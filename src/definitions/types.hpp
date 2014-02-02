@@ -15,5 +15,6 @@ struct Action
 };
 
 typedef std::vector<Time> RPState;
+typedef std::vector<Time> ProductionState;
 
 #endif

@@ -35,6 +35,17 @@ Time min_time_to_gather_lc(Node n, const Resource lc) {
     Time t = time_to_lc(n.state, lc);
     while(true)
     {
+        if(!can_build_lc_rp(n))
+        {
+            if(can_build_zv(n))
+            {
+                n = build_zv(n);
+            }
+
+            if(!can_build_lc_rp(n))
+                break;
+        }
+
         n = build_lc_rp(n);
         Time new_t = time_to_lc(n.state, lc);
         if(new_t < t)
@@ -50,6 +61,8 @@ Time min_time_to_gather_lc(Node n, const Resource lc) {
     return t;
 }
 
+constexpr unsigned NUM_ZPS = 2;
+
 class BuildOrderProblem
 {
 public:
@@ -57,40 +70,104 @@ public:
     {
         Node start;
         start.t = 0;
-        start.state.lc_rp_state = {-5 * TICKS_PER_SECOND,
-                                   -5 * TICKS_PER_SECOND,
-                                   -5 * TICKS_PER_SECOND};
         return start;
     }
 
     //! Return initial upper bound for plan length.
     Time upper_bound()
     {
-        return 5 * 60 * TICKS_PER_SECOND;
+        Node n = start_node();
+        n = build_qp_rp(n);
+        n = build_foundation(n);
+        n = build_depot(n);
+        for(unsigned i = 0; i < NUM_ZPS; ++i)
+        {
+            n = build_zp(n);
+        }
+        for(unsigned i = 0; i < NUM_ZPS; ++i)
+        {
+            n = upgrade_zp(n);
+        }
+        assert(is_goal(n));
+        return n.t + 1;
     }
 
     bool is_goal(const Node& n)
     {
-        return n.state.lc_rp_state.size() >= 3 && n.state.qp_rp_state.size() >= 5;
+        return n.state.zp_upgrade_queue.size() + n.state.upgraded_zps >= NUM_ZPS;
     }
 
     //! Return lower bound on time to goal from given node.
     Time heuristic(const Node& n)
     {
-        std::size_t s = n.state.lc_rp_state.size() + n.state.qp_rp_state.size();
-        if(s < 8)
+        Time build_wait = 0;
+        Resource lc_cost = 0;
+
+        if(!has_ready_depot(n))
         {
-            return min_time_to_gather_lc(n, (8 - s) * RP_LC_COST);
+            if(has_queued_depot(n))
+            {
+                build_wait += time_to_next_produced(n.state.depot_queue);
+            }
+            else
+            {
+                if(!has_foundation(n))
+                {
+                    build_wait += FOUNDATION_BUILD_TIME;
+                    lc_cost += FOUNDATION_LC_COST;
+                }
+                build_wait += DEPOT_BUILD_TIME;
+                lc_cost += DEPOT_LC_COST;
+                // lc_cost += (QP_CYCLE_LENGTH * DEPOT_QP_COST) / LC_CYCLE_LENGTH;
+            }
         }
-        else
+
+        unsigned zps_upgraded = n.state.zp_upgrade_queue.size() + n.state.upgraded_zps;
+        if(zps_upgraded < NUM_ZPS)
         {
-            return 0;
+            lc_cost += SKIP_UPGRADE_LC_COST * (NUM_ZPS - zps_upgraded);
+            // lc_cost += (QP_CYCLE_LENGTH * SKIP_UPGRADE_QP_COST) / LC_CYCLE_LENGTH * (NUM_ZPS - zps_upgraded);
         }
+
+        unsigned zps_produced = zps_upgraded + n.state.zp_queue.size() + n.state.zps;
+        if(zps_produced < NUM_ZPS)
+        {
+            lc_cost += ZP_LC_COST * (NUM_ZPS - zps_produced);
+            // lc_cost += (QP_CYCLE_LENGTH * ZP_QP_COST) / LC_CYCLE_LENGTH * (NUM_ZPS - zps_produced);
+            build_wait += ZP_PILOT_TIME;
+        }
+
+        unsigned zvs_produced = zps_produced + n.state.zv_queue.size() + n.state.zvs;
+        if(zvs_produced < NUM_ZPS)
+        {
+            lc_cost += ZV_LC_COST * (NUM_ZPS - zvs_produced);
+        }
+
+        return std::max(build_wait, min_time_to_gather_lc(n, lc_cost));
     }
 
     template<typename T>
     void visit_neighbors(const Node& n, T visitor)
     {
+        // For up to 7 ZPs, we only need 1 Depot.
+        if(!has_depot(n))
+        {
+            if(!has_foundation(n))
+            {
+                try_build_foundation(n, visitor);
+            }
+            try_build_depot(n, visitor);
+        }
+
+        try_build_zv(n, visitor);
+
+        if(n.state.zvs <= 1)
+        {
+            try_build_zp(n, visitor);
+        }
+        try_pilot_zp(n, visitor);
+        try_upgrade_zp(n, visitor);
+
         try_build_lc_rp(n, visitor);
         try_build_qp_rp(n, visitor);
 
